@@ -209,7 +209,7 @@ Los hiperparámetros se seleccionaron considerando aspectos clave para evitar el
 
 4. **Subsampling** (`subsample` y `colsample_bytree`: 0.6-1.0): Introduce variabilidad en cada árbol, mejorando la robustez del ensamblaje.
 
-La búsqueda aleatoria evaluó 100 combinaciones diferentes de hiperparámetros, utilizando como métrica de optimización el F2-score, que otorga mayor importancia al recall que a la precisión.
+La búsqueda aleatoria evaluó 100 combinaciones diferentes de hiperparámetros, utilizando como métrica de optimización el F0.5-score, que otorga mayor importancia a la precision que al recall. Esto se alinea con el objetivo de minimizar los falsos positivos, dado el contexto clínico del problema.
 
 Los mejores hiperparámetros encontrados fueron:
 ```
@@ -225,41 +225,47 @@ classifier__colsample_bytree: 0.8
 
 ### Validación Cruzada y Ajuste de Umbral
 
-Un aspecto crítico del proceso fue la optimización del umbral de decisión mediante validación cruzada. En lugar de utilizar el umbral predeterminado de 0.5, se buscó el valor que maximizara el F2-score:
+Un aspecto crítico del proceso fue la optimización del umbral de decisión mediante validación cruzada. En lugar de utilizar el umbral predeterminado de 0.5, se buscó el valor que maximizara la precision pero sin sacrificar el recall, limintando el valor minimo a 0.6:
 
 ```python
-def cross_validate_threshold(X, y, pipeline, cv_splits=10, beta=2.0):
-    """Realiza CV para encontrar el umbral óptimo que maximiza F-beta."""
-    # Inicializar listas para guardar predicciones y labels verdaderos
+def cross_validate_threshold_precision(X, y, pipeline, cv_splits=10, min_recall=0.6):
+    """Realiza validación cruzada para encontrar el umbral que maximiza precisión sin perder recall."""
+    print(f"Realizando validación cruzada para maximizar precisión con recall mínimo de {min_recall}...")
+
     all_probas = []
     all_true = []
 
-    # Configurar CV
     cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
 
-    # Realizar CV
     for fold, (train_idx, val_idx) in enumerate(cv.split(X, y)):
-        # División train-val
+        print(f"  Fold {fold + 1}/{cv_splits}...")
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-        # Entrenar modelo
         fold_pipeline = pipeline.fit(X_train, y_train)
-
-        # Obtener probabilidades
         y_val_proba = fold_pipeline.predict_proba(X_val)[:, 1]
 
-        # Guardar para cálculo final
         all_probas.extend(y_val_proba)
         all_true.extend(y_val)
 
-    # Encontrar threshold óptimo
-    optimal_threshold, optimal_fbeta = find_threshold(all_true, all_probas, beta)
-    
+    all_probas = np.array(all_probas)
+    all_true = np.array(all_true)
+
+    # Obtener mejor threshold maximizando precisión sin perder recall
+    optimal_threshold, best_precision, corresponding_recall = find_threshold_max_precision(
+        all_true, all_probas, min_recall=min_recall
+    )
+
+    print(f"\n🔍 Umbral óptimo: {optimal_threshold:.4f} | Precisión: {best_precision:.4f} | Recall: {corresponding_recall:.4f}")
+
+    optimal_preds = (all_probas >= optimal_threshold).astype(int)
+    print("\nReporte de clasificación con umbral óptimo:")
+    print(classification_report(all_true, optimal_preds))
+
     return optimal_threshold
 ```
 
-Este proceso determinó un umbral óptimo de 0.3974, significativamente menor que el umbral predeterminado de 0.5. Este ajuste refleja la prioridad dada al recall (sensibilidad) sobre la precisión, alineándose con el objetivo de minimizar los falsos negativos.
+Este proceso determinó un umbral óptimo de 0.6148, significativamente mayor que el umbral predeterminado de 0.5. Este ajuste refleja la prioridad dada a la precisión sobre el recall, alineándose con el objetivo de minimizar los falsos positivos.
 
 ## Evaluación del Modelo
 
@@ -267,16 +273,16 @@ Este proceso determinó un umbral óptimo de 0.3974, significativamente menor qu
 
 Para evaluar el rendimiento del modelo, se seleccionó como métrica principal el F2-score en lugar del F1-score tradicional. Esta decisión se fundamenta en:
 
-1. **Priorización del recall**: En el contexto de detección de problemas de calidad del sueño, es más importante identificar correctamente a todos los individuos con mala calidad de sueño (minimizar falsos negativos) que tener alta precisión.
+1. **Priorización de la precision**: En el contexto de detección de problemas de calidad del sueño, es más importante identificar correctamente a todos los individuos con mala calidad de sueño (minimizar falsos positivos) que tener un alto recall.
 
-2. **Desbalanceo de clases**: El F2-score es más adecuado para conjuntos de datos desbalanceados cuando se prioriza el recall.
+2. **Desbalanceo de clases**: El F0.5-score es más adecuado para conjuntos de datos desbalanceados cuando se prioriza la precisión.
 
-El F2-score se calcula como:
+El F0.5-score se calcula como:
 ```
-F2 = 5 * (precisión * recall) / (4 * precisión + recall)
+F₀.₅ = 1.25 × (precisión × recall) / (0.25 × precisión + recall)
 ```
 
-Además del F2-score, se monitorizaron métricas complementarias:
+Además del F0.5-score, se monitorizaron métricas complementarias:
 - Precisión
 - Recall (sensibilidad)
 - Accuracy
@@ -304,29 +310,29 @@ F2.0-score: 0.9161
 
 Estos resultados revelan:
 
-1. **Alto recall para la clase positiva (0.97)**: El modelo identifica correctamente el 97% de los casos de buena calidad de sueño.
+1. **Recall moderado para la clase positiva (0.74)**: El modelo identifica correctamente el 74% de los casos de buena calidad de sueño.
 
-2. **Precisión moderada para la clase positiva (0.76)**: Aproximadamente el 76% de los casos clasificados como buena calidad de sueño son correctos.
+2. **Precisión alta para la clase positiva (0.87)**: Aproximadamente el 87% de los casos clasificados como buena calidad de sueño son correctos.
 
-3. **Bajo recall para la clase negativa (0.34)**: El modelo solo detecta el 34% de los casos de mala calidad de sueño.
+3. **Recall moderado para la clase negativa (0.76)**: El modelo detecta el 76% de los casos de mala calidad de sueño.
 
-4. **F2-score global de 0.9161**: Un valor elevado que refleja el buen desempeño general del modelo, especialmente considerando la priorización del recall.
+4. **F0.5-score global de 0.8364**: Un valor elevado que refleja el buen desempeño general del modelo, especialmente considerando la priorización de la precisión.
 
 ### Análisis de la Matriz de Confusión
 
 La matriz de confusión proporciona información detallada sobre las predicciones:
 
 ```
-[[10 19]
- [ 2 59]]
+[[22  7]
+ [16 45]]
 ```
 
-- **Verdaderos Positivos (TP)**: 59 casos de buena calidad de sueño correctamente clasificados.
-- **Falsos Negativos (FN)**: 2 casos de buena calidad de sueño incorrectamente clasificados como mala calidad.
-- **Verdaderos Negativos (TN)**: 10 casos de mala calidad de sueño correctamente clasificados.
-- **Falsos Positivos (FP)**: 19 casos de mala calidad de sueño incorrectamente clasificados como buena calidad.
+- **Verdaderos Positivos (TP)**: 45 casos de buena calidad de sueño correctamente clasificados.
+- **Falsos Negativos (FN)**: 16 casos de buena calidad de sueño incorrectamente clasificados como mala calidad.
+- **Verdaderos Negativos (TN)**: 7 casos de mala calidad de sueño correctamente clasificados.
+- **Falsos Positivos (FP)**: 22 casos de mala calidad de sueño incorrectamente clasificados como buena calidad.
 
-El patrón de errores refleja claramente la priorización del recall para la clase positiva, con un número relativamente alto de falsos positivos como consecuencia. Esta configuración es coherente con el objetivo de minimizar los falsos negativos, aunque a costa de generar más falsos positivos.
+El patrón de errores refleja claramente la priorización de la precisión para la clase positiva, con un número relativamente alto de falsos negativos como consecuencia. Esta configuración es coherente con el objetivo de minimizar los falsos positivos, aunque a costa de generar más falsos negativos.
 
 ## Inferencia
 
@@ -368,28 +374,27 @@ La inferencia se realizó sobre un conjunto de datos de 175 registros generados 
 ```
 Resumen de predicciones:
 Total de registros procesados: 175
-Predicciones positivas (buena calidad de sueño): 129 (73.7%)
-Predicciones negativas (mala calidad de sueño): 46 (26.3%)
-
+Predicciones positivas (buena calidad de sueño): 99 (56.6%)
+Predicciones negativas (mala calidad de sueño): 76 (43.4%)
 Métricas de evaluación:
-Accuracy: 0.8343
-Precision: 0.7752
-Recall: 1.0000
-F1-score: 0.8734
-F2-score: 0.9452
+Accuracy: 0.9943
+Precision: 1.0000
+Recall: 0.9900
+F1-score: 0.9950
+F2-score: 0.9920
 ```
 
 Estos resultados muestran:
 
-1. **Recall perfecto (1.0000)**: El modelo identificó correctamente todos los casos de buena calidad de sueño en el conjunto de inferencia.
+1. **Recall casi perfecto (0.99)**: El modelo identificó correctamente a casi todos los casos de buena calidad de sueño en el conjunto de inferencia.
 
-2. **Precisión razonable (0.7752)**: Aproximadamente el 78% de los casos clasificados como buena calidad de sueño son correctos.
+2. **Precisión perfecta (1)**: El 100% de los casos clasificados como buena calidad de sueño son correctos.
 
-3. **F2-score excelente (0.9452)**: Confirma el buen rendimiento del modelo, especialmente en términos de minimización de falsos negativos.
+3. **F1-score excelente (0.9950)**: Confirma el buen rendimiento del modelo, especialmente en términos de minimización de falsos positivos.
 
-4. **Distribución de predicciones**: El modelo clasificó el 73.7% de los casos como buena calidad de sueño y el 26.3% como mala calidad, una distribución coherente con la observada en el conjunto de entrenamiento.
+4. **Distribución de predicciones**: El modelo clasificó el 56.6% de los casos como buena calidad de sueño y el 43.4% como mala calidad, una distribución un poco lejos de la realidad con la observada en el conjunto de entrenamiento.
 
-Los resultados de inferencia son consistentes con los obtenidos durante la evaluación del modelo, lo que sugiere una buena capacidad de generalización a nuevos datos.
+Los resultados de inferencia son consistentes con los obtenidos durante la evaluación del modelo, lo que sugiere una conservadora capacidad de generalización a nuevos datos.
 
 ## Conclusiones y Recomendaciones
 
@@ -397,11 +402,11 @@ Los resultados de inferencia son consistentes con los obtenidos durante la evalu
 
 El modelo desarrollado ha demostrado ser efectivo para la clasificación de la calidad del sueño, con un enfoque particular en minimizar los falsos negativos. Los principales hallazgos son:
 
-1. **Priorización exitosa del recall**: Se logró un recall de 1.0 en el conjunto de inferencia, cumpliendo el objetivo de no perder casos de buena calidad de sueño.
+1. **Priorización exitosa de la precisión**: Se logró un precisión de 1.0 en el conjunto de inferencia, cumpliendo el objetivo de no perder casos de mala calidad de sueño.
 
-2. **Balance adecuado de métricas**: A pesar de priorizar el recall, se mantuvo una precisión razonable (0.78), lo que indica un equilibrio adecuado entre sensibilidad y especificidad.
+2. **Balance adecuado de métricas**: A pesar de priorizar la precisión, se mantuvo un recall excelente (0.99), lo que indica un equilibrio adecuado entre sensibilidad y especificidad.
 
-3. **Umbral optimizado efectivo**: La estrategia de ajustar el umbral de decisión (0.3974) demostró ser crucial para alcanzar el balance deseado entre las métricas.
+3. **Umbral optimizado efectivo**: La estrategia de ajustar el umbral de decisión (0.6785) demostró ser crucial para alcanzar el balance deseado entre las métricas.
 
 4. **Robustez del pipeline**: La integración de preprocesamiento y modelado en un pipeline único facilitó la consistencia entre entrenamiento e inferencia.
 
@@ -413,70 +418,53 @@ A pesar de los buenos resultados, el modelo presenta algunas limitaciones import
 
 2. **Ausencia de estructura clara en los datos**: Como reveló el análisis de clustering, los datos no presentan agrupaciones naturales evidentes, lo que dificulta la identificación de patrones robustos.
 
-3. **Bajo recall para la clase negativa**: Aunque se priorizó el recall global, el modelo muestra dificultades para identificar correctamente los casos de mala calidad de sueño (recall de solo 0.34 en el conjunto de prueba).
+3. **Posible sobreajuste**: A pesar de las medidas tomadas, la complejidad del modelo en relación con el tamaño del dataset podría resultar en cierto grado de sobreajuste.
 
-4. **Posible sobreajuste**: A pesar de las medidas tomadas, la complejidad del modelo en relación con el tamaño del dataset podría resultar en cierto grado de sobreajuste.
-
-### Posibles Mejoras
-
-Para futuras iteraciones del modelo, se recomiendan las siguientes mejoras:
-
-1. **Aumentar el tamaño del dataset**: Recopilar más datos para mejorar la representatividad y robustez del modelo.
-
-2. **Explorar técnicas de ensamblaje alternativas**: Considerar otros algoritmos como Random Forest o modelos de stacking que podrían capturar diferentes aspectos de los datos.
-
-3. **Feature engineering avanzado**: Aunque XGBoost captura interacciones automáticamente, la creación de características más sofisticadas podría mejorar el rendimiento.
-
-4. **Validación externa**: Evaluar el modelo con datos de fuentes independientes para verificar su generalización en contextos diferentes.
-
-5. **Calibración de probabilidades**: Implementar técnicas de calibración para mejorar la interpretabilidad de las probabilidades predichas.
-
-6. **Balance entre clases más equitativo**: Explorar técnicas de muestreo más sofisticadas para abordar el desbalanceo de clases sin sacrificar información.
 
 ## Anexos
 
 ### Hiperparámetros Finales del Modelo
 
 ```
-classifier__subsample: 0.8
-classifier__scale_pos_weight: 0.5557377049180328
-classifier__n_estimators: 50
-classifier__min_child_weight: 5
-classifier__max_depth: 4
-classifier__learning_rate: 0.01
-classifier__gamma: 0.1
-classifier__colsample_bytree: 0.8
+  classifier__subsample: 0.6
+  classifier__scale_pos_weight: 0.5557377049180328
+  classifier__n_estimators: 200
+  classifier__min_child_weight: 5
+  classifier__max_depth: 4
+  classifier__learning_rate: 0.01
+  classifier__gamma: 0.1
+  classifier__colsample_bytree: 1.0
 ```
 
 ### Umbral Optimizado
 
-El umbral optimizado para la clasificación es 0.3974, determinado mediante validación cruzada con optimización de F2-score.
+El umbral optimizado para la clasificación es 0.6785, determinado mediante validación cruzada con optimización de la precisión.
 
 ### Rendimiento en Conjunto de Prueba
 
 ```
 Evaluación con threshold optimizado:
               precision    recall  f1-score   support
-           0       0.83      0.34      0.49        29
-           1       0.76      0.97      0.85        61
-    accuracy                           0.77        90
-   macro avg       0.79      0.66      0.67        90
-weighted avg       0.78      0.77      0.73        90
+           0       0.58      0.76      0.66        29
+           1       0.87      0.74      0.80        61
+    accuracy                           0.74        90
+   macro avg       0.72      0.75      0.73        90
+weighted avg       0.77      0.74      0.75        90
 
 Matriz de confusión:
-[[10 19]
- [ 2 59]]
-
-F2.0-score: 0.9161
+[[22  7]
+ [16 45]]
+ 
+F0.5-score: 0.8364
 ```
 
-### Rendimiento en Conjunto de Inferencia
+### Rendimiento en Conjunto de Inferencia(dataset generado por IA)
 
 ```
 Métricas de evaluación:
-Accuracy: 0.8343
-Precision: 0.7752
-Recall: 1.0000
-F1-score: 0.8734
-F2-score: 0.9452
+Accuracy: 0.9943
+Precision: 1.0000
+Recall: 0.9900
+F1-score: 0.9950
+F2-score: 0.9920
 ```
