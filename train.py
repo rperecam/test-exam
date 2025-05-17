@@ -99,66 +99,56 @@ def get_pipeline(X_sample, pos_ratio):
     return pipeline
 
 
-def find_threshold(y_true, y_proba, beta=2.0):
-    """Encuentra el mejor umbral según F-beta score."""
+def find_threshold_max_precision(y_true, y_proba, min_recall=0.6):
+    """Encuentra el umbral que maximiza la precisión sin que el recall caiga por debajo de min_recall."""
     precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
 
-    # Añadir el threshold 1.0 que falta en thresholds
+    # Añadir el último umbral (1.0) si falta
     thresholds = np.append(thresholds, 1.0)
 
-    # Calcular F-beta para cada threshold
-    fbeta_scores = np.zeros_like(precision)
-    for i in range(len(precision)):
-        if precision[i] + recall[i] > 0:  # Evitar división por cero
-            beta_squared = beta ** 2
-            fbeta_scores[i] = (1 + beta_squared) * (precision[i] * recall[i]) / \
-                              (beta_squared * precision[i] + recall[i])
+    # Filtrar umbrales con suficiente recall
+    valid_idx = np.where(recall >= min_recall)[0]
 
-    # Encontrar el índice del mejor F-beta
-    best_idx = np.argmax(fbeta_scores)
+    if len(valid_idx) == 0:
+        print(f"⚠️  Ningún umbral mantiene recall ≥ {min_recall}. Se tomará el mejor posible.")
+        best_idx = np.argmax(precision)
+    else:
+        best_idx = valid_idx[np.argmax(precision[valid_idx])]
 
-    return thresholds[best_idx], fbeta_scores[best_idx]
+    return thresholds[best_idx], precision[best_idx], recall[best_idx]
 
 
-def cross_validate_threshold(X, y, pipeline, cv_splits=10, beta=2.0):
-    """Realiza CV para encontrar el umbral óptimo que maximiza F-beta."""
-    print(f"Realizando validación cruzada para encontrar umbral óptimo (F{beta}-score)...")
 
-    # Inicializar listas para guardar predicciones y labels verdaderos
+def cross_validate_threshold_precision(X, y, pipeline, cv_splits=10, min_recall=0.6):
+    """Realiza validación cruzada para encontrar el umbral que maximiza precisión sin perder recall."""
+    print(f"Realizando validación cruzada para maximizar precisión con recall mínimo de {min_recall}...")
+
     all_probas = []
     all_true = []
 
-    # Configurar CV
     cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
 
-    # Realizar CV
     for fold, (train_idx, val_idx) in enumerate(cv.split(X, y)):
-        print(f"  Procesando fold {fold + 1}/{cv_splits}...")
-
-        # División train-val
+        print(f"  Fold {fold + 1}/{cv_splits}...")
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-        # Clonar pipeline para evitar data leakage
         fold_pipeline = pipeline.fit(X_train, y_train)
-
-        # Obtener probabilidades de predicción
         y_val_proba = fold_pipeline.predict_proba(X_val)[:, 1]
 
-        # Guardar para cálculo final
         all_probas.extend(y_val_proba)
         all_true.extend(y_val)
 
-    # Convertir a arrays numpy
     all_probas = np.array(all_probas)
     all_true = np.array(all_true)
 
-    # Encontrar threshold óptimo
-    optimal_threshold, optimal_fbeta = find_threshold(all_true, all_probas, beta)
+    # Obtener mejor threshold maximizando precisión sin perder recall
+    optimal_threshold, best_precision, corresponding_recall = find_threshold_max_precision(
+        all_true, all_probas, min_recall=min_recall
+    )
 
-    print(f"  Umbral óptimo encontrado: {optimal_threshold:.4f} (F{beta}-score = {optimal_fbeta:.4f})")
+    print(f"\n🔍 Umbral óptimo: {optimal_threshold:.4f} | Precisión: {best_precision:.4f} | Recall: {corresponding_recall:.4f}")
 
-    # Mostrar clasificación con threshold óptimo
     optimal_preds = (all_probas >= optimal_threshold).astype(int)
     print("\nReporte de clasificación con umbral óptimo:")
     print(classification_report(all_true, optimal_preds))
@@ -166,7 +156,8 @@ def cross_validate_threshold(X, y, pipeline, cv_splits=10, beta=2.0):
     return optimal_threshold
 
 
-def optimize_hyperparameters(X, y, pipeline, pos_ratio, cv_splits=10, beta=2.0):
+
+def optimize_hyperparameters(X, y, pipeline, pos_ratio, cv_splits=10, beta=0.5):
     """Realiza búsqueda aleatoria de hiperparámetros para XGBoost."""
     print("Optimizando hiperparámetros para XGBoost...")
 
@@ -230,7 +221,7 @@ def save_model_and_threshold(model, threshold, path='best_model.pkl'):
     print(f"Modelo y threshold guardados en '{path}'")
 
 
-def evaluate_model_with_threshold(model, X_test, y_test, threshold, beta=2.0):
+def evaluate_model_with_threshold(model, X_test, y_test, threshold, beta=0.5):
     """Evalúa el modelo con el threshold optimizado."""
     # Obtener probabilidades
     y_proba = model.predict_proba(X_test)[:, 1]
@@ -272,13 +263,13 @@ def main():
     base_pipeline = get_pipeline(X_train, pos_ratio)
 
     # 6. Optimizar hiperparámetros con validación cruzada
-    best_model, best_params = optimize_hyperparameters(X_train, y_train, base_pipeline, pos_ratio, cv_splits=10, beta=2.0)
+    best_model, best_params = optimize_hyperparameters(X_train, y_train, base_pipeline, pos_ratio, cv_splits=10, beta=0.5)
 
     # 7. Encontrar threshold óptimo
-    optimal_threshold = cross_validate_threshold(X_train, y_train, best_model, cv_splits=10, beta=2.0)
+    optimal_threshold = cross_validate_threshold_precision(X_train, y_train, best_model, cv_splits=10, min_recall=0.6)
 
     # 8. Evaluar modelo final en test set
-    evaluate_model_with_threshold(best_model, X_test, y_test, optimal_threshold, beta=2.0)
+    evaluate_model_with_threshold(best_model, X_test, y_test, optimal_threshold, beta=0.5)
 
     # 9. Guardar modelo final y threshold
     save_model_and_threshold(best_model, optimal_threshold, 'model/pipeline.cloudpkl')
